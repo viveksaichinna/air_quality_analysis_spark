@@ -96,10 +96,10 @@ if __name__ == '__main__':
     bucket_name = 'openaq-data-archive'
     
     # Path for the metadata CSV file
-    metadata_file = 'locations_metadata.csv'
+    metadata_file = '/workspaces/air_quality_analysis_spark/ingestion/locations_metadata.csv'
     
     # Base local directory where downloads will be saved (all in one directory)
-    base_local_dir = 'data/pending'
+    base_local_dir = '/workspaces/air_quality_analysis_spark/ingestion/data/pending'
     
     # Ensure the base directory exists
     if not os.path.exists(base_local_dir):
