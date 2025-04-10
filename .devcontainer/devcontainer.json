@@ -1,5 +1,11 @@
 {
-    "name"  : "Air Quality Analysis Using Spark",
-    "image" : "mcr.microsoft.com/vscode/devcontainers/python:3.8",
-    "postCreateCommand": "pip install pyspark"
-}
+    "name": "Air Quality Analysis Using Spark",
+    "image": "mcr.microsoft.com/vscode/devcontainers/python:3.8",
+    "postCreateCommand": "pip install -r /workspaces/air_quality_analysis_spark/requirements.txt",
+    "hostRequirements": {
+      "cpus": 4,
+      "memory": "16GB",
+      "storage": "32GB"
+    }
+  }
+  
