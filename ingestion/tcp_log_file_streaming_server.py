@@ -86,7 +86,7 @@ def process_log_file(file_path, client_socket):
                     else:
                         print(f"Skipping invalid line: {line}")  # Log any invalid lines that don't parse correctly
 
-                    time.sleep(0.01)  # Optional delay to avoid overloading the client or the system (can be adjusted)
+                    time.sleep(0.01)  # Optional delay to avoid overloading the client
 
     except Exception as e:
         print(f"Error processing {filename}: {e}")  # Log any errors that occur while processing the file
@@ -111,11 +111,13 @@ def accept_client_connections(server_socket):
             client_socket, client_address = server_socket.accept()  # Accept a new client connection
             print(f"New client connected: {client_address}")
 
-            # Process each log file for the connected client
-            for filename in os.listdir(LOG_FOLDER_PATH):
+            # Get all files in LOG_FOLDER_PATH and sort them by filename.
+            # Given the naming format (e.g., location-8118-20250125.csv),
+            # lexicographical sorting will order by date correctly.
+            for filename in sorted(os.listdir(LOG_FOLDER_PATH)):
                 file_path = os.path.join(LOG_FOLDER_PATH, filename)  # Full file path
 
-                # Skip directories and the 'processed' directory itself
+                # Skip directories and ensure it's not the processed folder
                 if not os.path.isfile(file_path) or filename == 'processed':
                     continue
 

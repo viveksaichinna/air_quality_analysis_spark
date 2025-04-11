@@ -1,7 +1,7 @@
 {
   "name": "Air Quality Analysis Using Spark",
   "image": "mcr.microsoft.com/vscode/devcontainers/python:3.8",
-  "postCreateCommand": "pip install -r /workspaces/air_quality_analysis_spark/requirements.txt && python /workspaces/air_quality_analysis_spark/ingestion/download_from_s3.py && nohup python /workspaces/air_quality_analysis_spark/ingestion/tcp_log_file_streaming_server.py > /workspaces/air_quality_analysis_spark/ingestion/data/server.log 2>&1 &",
+  "postCreateCommand": "pip install -r /workspaces/air_quality_analysis_spark/requirements.txt && python /workspaces/air_quality_analysis_spark/ingestion/download_from_s3.py",
   
   "hostRequirements": {
     "cpus": 4,
