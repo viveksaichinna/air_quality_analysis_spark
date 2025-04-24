@@ -4,6 +4,7 @@ from pyspark.sql.types import *
 import logging
 import json
 import time
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,28 +31,23 @@ def define_schema():
     ])
 
 def parse_json_array(json_str):
-    """Parse the JSON array string safely"""
     try:
-        # Remove outer quotes and parse as JSON
         return json.loads(json_str.replace("'", '"'))
     except json.JSONDecodeError:
         logger.error(f"Failed to parse: {json_str}")
         return None
 
-def read_from_tcp_stream(spark, schema):
-    """Read and parse streaming data with enhanced error handling"""
+def read_from_tcp_stream(spark):
     logger.info("Creating TCP stream reader")
-    
-    # Register the UDF for JSON parsing
+
     parse_json_udf = udf(parse_json_array, ArrayType(StringType()))
-    
+
     raw_df = spark.readStream \
         .format("socket") \
         .option("host", "localhost") \
         .option("port", 9999) \
         .load()
-    
-    # Parse the JSON array and expand into columns
+
     parsed_df = raw_df \
         .withColumn("parsed", parse_json_udf(col("value"))) \
         .filter(size(col("parsed")) == 9) \
@@ -66,14 +62,12 @@ def read_from_tcp_stream(spark, schema):
             col("parsed")[7].alias("units"),
             col("parsed")[8].cast("double").alias("value")
         )
-    
     return parsed_df
 
 def transform_with_watermark(stream_df):
-    """Apply transformations with watermark"""
     logger.info("Applying timestamp conversion and watermark")
     return stream_df \
-        .withColumn("timestamp", to_timestamp(col("datetime"), "yyyy-MM-dd'T'HH:mm:ssXXX")) \
+        .withColumn("timestamp", to_timestamp("datetime", "yyyy-MM-dd'T'HH:mm:ssXXX")) \
         .withWatermark("timestamp", "10 minutes") \
         .select(
             col("location_id").cast("integer"),
@@ -85,22 +79,19 @@ def transform_with_watermark(stream_df):
             "value"
         )
 
-def pivot_metrics(watermarked_df):
-    """Pivot metrics with proper aggregation"""
+def pivot_metrics(df):
     logger.info("Pivoting metrics")
-    return watermarked_df \
-        .groupBy("location_id", "timestamp", "location", "lat", "lon") \
+    return df.groupBy("location_id", "timestamp", "location", "lat", "lon") \
         .pivot("parameter", ["pm25", "temperature", "humidity"]) \
         .agg(expr("first(value, true)")) \
         .withColumnRenamed("pm25", "pm2_5")
 
 def validate_data(df):
-    """Data quality checks"""
     logger.info("Validating data quality")
     return df.filter(
-        (col("pm2_5").between(0, 500)) & 
-        (col("timestamp").isNotNull()) &
-        (col("location_id").isNotNull())
+        col("pm2_5").between(0, 500) &
+        col("timestamp").isNotNull() &
+        col("location_id").isNotNull()
     ).withColumn("is_valid", 
         when(col("pm2_5").isNull(), False)
         .when(col("temperature").isNull() | (col("temperature") < -50), False)
@@ -108,54 +99,42 @@ def validate_data(df):
         .otherwise(True)
     )
 
-def write_stream(stream_df):
-    """Write the stream with proper management"""
+def save_to_csv(batch_df, batch_id):
+    """Save each micro-batch as CSV using batch_id"""
+    output_path = f"/workspaces/air_quality_analysis_spark/ingestion/data/processed/batch_{batch_id}"
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    batch_df.write \
+        .mode("append") \
+        .option("header", "true") \
+        .csv(output_path)
+
+def write_stream(df):
     logger.info("Starting stream writes")
-    
-    # Ensure we're writing the correct DataFrame
-    processed_df = stream_df
-    
-    # Console output for debugging
-    console_query = processed_df.writeStream \
+
+    # CSV output via foreachBatch
+    csv_query = df.writeStream \
+        .foreachBatch(save_to_csv) \
         .outputMode("append") \
-        .format("console") \
-        .option("truncate", False) \
+        .option("checkpointLocation", "/workspaces/air_quality_analysis_spark/data/checkpoints_csv") \
         .start()
-    
-    # Parquet output - add partitionBy for better organization
-    parquet_query = processed_df.writeStream \
-        .outputMode("append") \
-        .format("parquet") \
-        .option("path", "/workspaces/air_quality_analysis_spark/data/processed") \
-        .option("checkpointLocation", "/workspaces/air_quality_analysis_spark/data/checkpoints") \
-        .partitionBy("location_id") \
-        .start()
-    
-    return console_query, parquet_query
+
+    return csv_query
 
 def main():
     logger.info("=== STARTING STREAM PROCESSING ===")
     spark = create_spark_session()
-    schema = define_schema()
-    
+
     try:
-        # 1. Read and parse stream
-        raw_stream = read_from_tcp_stream(spark, schema)
-        
-        # 2. Apply transformations
-        watermarked_stream = transform_with_watermark(raw_stream)
-        pivoted_stream = pivot_metrics(watermarked_stream)
-        validated_stream = validate_data(pivoted_stream)
-        
-        # 3. Start output streams
-        console_query, parquet_query = write_stream(validated_stream)
-        
-        # 4. Monitor streams
-        while True:
-            time.sleep(5)
-            if not console_query.isActive or not parquet_query.isActive:
-                break
-                
+        raw_stream = read_from_tcp_stream(spark)
+        transformed = transform_with_watermark(raw_stream)
+        pivoted = pivot_metrics(transformed)
+        validated = validate_data(pivoted)
+
+        csv_query = write_stream(validated)
+
+        csv_query.awaitTermination()
+
     except Exception as e:
         logger.error(f"Stream processing failed: {str(e)}")
         raise
