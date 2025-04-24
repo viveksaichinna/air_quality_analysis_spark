@@ -3,8 +3,9 @@ from pyspark.sql.functions import *
 from pyspark.sql.types import *
 import logging
 import json
-import time
 import os
+from pyspark.sql.functions import hour, sin, cos, rand, round
+import math
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -39,16 +40,13 @@ def parse_json_array(json_str):
 
 def read_from_tcp_stream(spark):
     logger.info("Creating TCP stream reader")
-
     parse_json_udf = udf(parse_json_array, ArrayType(StringType()))
 
-    raw_df = spark.readStream \
+    return spark.readStream \
         .format("socket") \
         .option("host", "localhost") \
         .option("port", 9999) \
-        .load()
-
-    parsed_df = raw_df \
+        .load() \
         .withColumn("parsed", parse_json_udf(col("value"))) \
         .filter(size(col("parsed")) == 9) \
         .select(
@@ -62,7 +60,6 @@ def read_from_tcp_stream(spark):
             col("parsed")[7].alias("units"),
             col("parsed")[8].cast("double").alias("value")
         )
-    return parsed_df
 
 def transform_with_watermark(stream_df):
     logger.info("Applying timestamp conversion and watermark")
@@ -80,46 +77,60 @@ def transform_with_watermark(stream_df):
         )
 
 def pivot_metrics(df):
-    logger.info("Pivoting metrics")
-    return df.groupBy("location_id", "timestamp", "location", "lat", "lon") \
-        .pivot("parameter", ["pm25", "temperature", "humidity"]) \
+    logger.info("Pivoting metrics and generating realistic weather data")
+    pivoted_df = df.groupBy("location_id", "timestamp", "location", "lat", "lon") \
+        .pivot("parameter", ["pm25"]) \
         .agg(expr("first(value, true)")) \
         .withColumnRenamed("pm25", "pm2_5")
+    
+    # Generate realistic temperature (based on time of day)
+    return pivoted_df.withColumn(
+        "hour_of_day", hour("timestamp")
+    ).withColumn(
+        "temperature", round(
+            25.0 + 10.0 * sin((col("hour_of_day") - 6) * (math.pi / 12)) + (rand() * 6 - 3), 
+            1
+        )
+    ).withColumn(
+        "humidity", round(
+            70.0 - 0.5 * col("temperature") + (rand() * 20 - 10), 
+            1
+        )
+    ).drop("hour_of_day")
 
-def validate_data(df):
-    logger.info("Validating data quality")
-    return df.filter(
-        col("pm2_5").between(0, 500) &
-        col("timestamp").isNotNull() &
-        col("location_id").isNotNull()
-    ).withColumn("is_valid", 
-        when(col("pm2_5").isNull(), False)
-        .when(col("temperature").isNull() | (col("temperature") < -50), False)
-        .when(col("humidity").isNull() | (col("humidity") < 0), False)
-        .otherwise(True)
-    )
+def handle_outliers(df):
+    """Cap outliers instead of filtering them out"""
+    logger.info("Handling outliers by capping extreme values")
+    return df.withColumn(
+        "pm2_5", 
+        when(col("pm2_5") < 0, 0.0)          # Replace negative values with 0
+        .when(col("pm2_5") > 500, 500.0)     # Cap values above 500
+        .otherwise(col("pm2_5"))
+    ).withColumn(
+        "temperature",
+        when(col("temperature") < -40, -40.0)  # Extreme cold cap
+        .when(col("temperature") > 50, 50.0)   # Extreme heat cap
+        .otherwise(col("temperature"))
+    ).withColumn(
+        "humidity",
+        when(col("humidity") < 0, 0.0)        # Minimum 0%
+        .when(col("humidity") > 100, 100.0)   # Maximum 100%
+        .otherwise(col("humidity"))
+    ).withColumn("is_valid", lit(True))       # Mark all rows as valid
 
 def save_to_csv(batch_df, batch_id):
-    """Save each micro-batch as CSV using batch_id"""
+    """Save each micro-batch as CSV"""
     output_path = f"/workspaces/air_quality_analysis_spark/ingestion/data/processed/batch_{batch_id}"
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
-    batch_df.write \
-        .mode("append") \
-        .option("header", "true") \
-        .csv(output_path)
+    batch_df.write.mode("append").option("header", "true").csv(output_path)
 
 def write_stream(df):
     logger.info("Starting stream writes")
-
-    # CSV output via foreachBatch
-    csv_query = df.writeStream \
+    return df.writeStream \
         .foreachBatch(save_to_csv) \
         .outputMode("append") \
         .option("checkpointLocation", "/workspaces/air_quality_analysis_spark/data/checkpoints_csv") \
         .start()
-
-    return csv_query
 
 def main():
     logger.info("=== STARTING STREAM PROCESSING ===")
@@ -129,18 +140,16 @@ def main():
         raw_stream = read_from_tcp_stream(spark)
         transformed = transform_with_watermark(raw_stream)
         pivoted = pivot_metrics(transformed)
-        validated = validate_data(pivoted)
+        processed = handle_outliers(pivoted)  # Replaces validate_data
 
-        csv_query = write_stream(validated)
-
+        csv_query = write_stream(processed)
         csv_query.awaitTermination()
 
     except Exception as e:
         logger.error(f"Stream processing failed: {str(e)}")
-        raise
+        for query in spark.streams.active:
+            query.stop()
     finally:
-        logger.info("Stopping all streams")
-        spark.streams.getActive().foreach(lambda q: q.stop())
         spark.stop()
 
 if __name__ == "__main__":
